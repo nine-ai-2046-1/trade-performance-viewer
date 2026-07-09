@@ -1,2 +1,3 @@
 # trade-performance-viewer
-Data from PepperStone
+- Download data from PepperStone trade history (it's csv)
+- rename to data.csv and put into data folder
