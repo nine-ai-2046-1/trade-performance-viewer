@@ -178,11 +178,43 @@
       color: #1d1d1f;
       font-weight: 600;
     }
+
+    .data-source-toggle {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .data-source-toggle button {
+      background: #e5e5e7;
+      color: #1d1d1f;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .data-source-toggle button.active {
+      background: #007aff;
+      color: white;
+    }
+
+    .data-source-toggle button:not(.active):hover {
+      background: #d1d1d6;
+    }
   </style>
 </head>
 <body>
   <div class="calendar-page">
     <h1>Nines</h1>
+    <div class="data-source-toggle">
+      <button id="trading212Btn" onclick="switchDataSource('trading212')" class="active">Trading 212</button>
+      <button id="futuBtn" onclick="switchDataSource('futu')">Futu</button>
+    </div>
     <div class="month-nav">
       <button id="prevBtn" onclick="prevMonth()">← Previous</button>
       <span id="currentMonth"></span>
@@ -203,6 +235,7 @@
     let calendarData = {};
     let availableMonths = [];
     let currentMonthIndex = 0;
+    let currentDataSource = "trading212"; // "trading212" or "futu"
 
     /**
      * Load CSV data from data/data.csv with no-cache headers
@@ -427,15 +460,34 @@
     function getMonthlyPL(year, month) {
       let total = 0;
       const daysInMonth = getDaysInMonth(year, month);
-      
+
       for (let day = 1; day <= daysInMonth; day++) {
         const dateKey = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
         if (calendarData[dateKey]) {
           total += calendarData[dateKey].total;
         }
       }
-      
+
       return total;
+    }
+
+    /**
+     * Get currency for a given month (from first available day)
+     * @param {number} year - Year
+     * @param {number} month - Month (1-12)
+     * @returns {string} Currency code
+     */
+    function getMonthlyCurrency(year, month) {
+      const daysInMonth = getDaysInMonth(year, month);
+
+      for (let day = 1; day <= daysInMonth; day++) {
+        const dateKey = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        if (calendarData[dateKey] && calendarData[dateKey].currency) {
+          return calendarData[dateKey].currency;
+        }
+      }
+
+      return "HKD";
     }
 
     function getFirstDayOfMonth(year, month) {
@@ -483,30 +535,26 @@
       // Display P/L data if available
       const dayData = calendarData[dateKey];
       if (dayData && !isOtherMonth) {
-        const { products, total } = dayData;
-        
+        const { products, total, currency } = dayData;
+
         // Display each product's P/L
         Object.keys(products).forEach(product => {
           const pl = products[product];
           const emoji = pl > 0 ? "🟢" : pl < 0 ? "🔴" : "⚪";
-          const sign = pl > 0 ? "+" : "";
-          const plValue = Math.round(Math.abs(pl));
-          const plDisplay = pl < 0 ? `($${plValue})` : `${sign}$${plValue}`;
-          
+          const plDisplay = formatPLWithCurrency(pl, currency);
+
           const item = document.createElement("div");
           item.className = "pl-item";
           item.style.color = PRODUCT_COLORS[product] || "#333";
           item.textContent = `${emoji} ${product} ${plDisplay}`;
           cell.appendChild(item);
         });
-        
+
         // Display total
-        const totalSign = total > 0 ? "+" : "";
         const totalItem = document.createElement("div");
         totalItem.className = "pl-total";
         const totalEmoji = total > 0 ? "🟢" : total < 0 ? "🔴" : "⚪";
-        const totalValue = Math.round(Math.abs(total));
-        const totalDisplay = total < 0 ? `($${totalValue})` : `${totalSign}$${totalValue}`;
+        const totalDisplay = formatPLWithCurrency(total, currency);
         totalItem.textContent = `${totalEmoji} Total: ${totalDisplay}`;
         cell.appendChild(totalItem);
       }
@@ -524,10 +572,8 @@
       // Display monthly P/L with <br> connection
       const monthlyPL = getMonthlyPL(year, month);
       if (monthlyPL !== 0) {
-        const monthlySign = monthlyPL > 0 ? "+" : "";
         const monthlyEmoji = monthlyPL > 0 ? "🟢" : "🔴";
-        const monthlyValue = Math.round(Math.abs(monthlyPL));
-        const monthlyDisplay = monthlyPL < 0 ? `($${monthlyValue})` : `${monthlySign}$${monthlyValue}`;
+        const monthlyDisplay = formatPLWithCurrency(monthlyPL, getMonthlyCurrency(year, month));
         header.innerHTML = `${name}<br>${monthlyEmoji} Total: ${monthlyDisplay}`;
       } else {
         header.textContent = name;
@@ -576,30 +622,357 @@
       return section;
     }
 
+    // =====================================================
+    // Futu CSV Parsing Functions
+    // =====================================================
+
+    /**
+     * Load Futu CSV data from data/futu-data.csv
+     * @returns {Promise<string>} CSV content
+     */
+    async function loadFutuCSVData() {
+      const response = await fetch("data/futu-data.csv", {
+        headers: {
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0"
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to load Futu CSV: ${response.statusText}`);
+      }
+      return await response.text();
+    }
+
+    /**
+     * Parse Futu CSV content and extract filled trades
+     * @param {string} csvText - Raw CSV content
+     * @returns {Array<Object>} Array of trade objects
+     */
+    function parseFutuCSV(csvText) {
+      // Remove BOM if present
+      const content = csvText.charCodeAt(0) === 0xFEFF ? csvText.slice(1) : csvText;
+      const lines = content.split("\n");
+      const trades = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // Parse CSV with proper handling of quoted fields
+        const parts = parseCSVLine(line);
+        if (parts.length < 37) continue;
+
+        // Filter only filled trades (交易狀態 == "全部成交")
+        const status = parts[6].trim().replace(/"/g, '');
+        if (status !== "全部成交") continue;
+
+        // Extract fields
+        const direction = parts[0].trim().replace(/"/g, '');
+        const stockCode = parts[1].trim().replace(/"/g, '');
+        const stockName = parts[2].trim().replace(/"/g, '');
+        const filledQty = parseNumber(parts[18]);
+        const filledPrice = parseNumber(parts[19]);
+        const filledAmount = parseNumber(parts[20]);
+        const fillTime = parts[21].trim().replace(/"/g, '');
+        const currency = parts[16].trim().replace(/"/g, '');
+
+        // Parse all fee columns (27-37)
+        const fees = {
+          commission: parseNumber(parts[26]),
+          platformFee: parseNumber(parts[27]),
+          settlementFee: parseNumber(parts[28]),
+          stampDuty: parseNumber(parts[29]),
+          tradingFee: parseNumber(parts[30]),
+          sfcLevy: parseNumber(parts[31]),
+          frcLevy: parseNumber(parts[32]),
+          auditFee: parseNumber(parts[33]),
+          tradingActivityFee: parseNumber(parts[34]),
+          sfcRegulatoryFee: parseNumber(parts[35]),
+          totalFees: parseNumber(parts[36])
+        };
+
+        // Parse date from fill time
+        const date = parseFutuDate(fillTime);
+        if (!date) continue;
+
+        trades.push({
+          date,
+          stockCode,
+          stockName,
+          direction,
+          filledQty,
+          filledPrice,
+          filledAmount,
+          currency,
+          fees,
+          totalFees: fees.totalFees
+        });
+      }
+
+      return trades;
+    }
+
+    /**
+     * Parse a CSV line with proper handling of quoted fields
+     * @param {string} line - CSV line
+     * @returns {Array<string>} Array of field values
+     */
+    function parseCSVLine(line) {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          result.push(current);
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      result.push(current);
+      return result;
+    }
+
+    /**
+     * Parse number from string, handling commas and quotes
+     * @param {string} str - Number string
+     * @returns {number} Parsed number
+     */
+    function parseNumber(str) {
+      if (!str) return 0;
+      const cleaned = str.trim().replace(/"/g, '').replace(/,/g, '');
+      const num = parseFloat(cleaned);
+      return isNaN(num) ? 0 : num;
+    }
+
+    /**
+     * Parse date from Futu fill time string
+     * @param {string} timeStr - Fill time string (e.g., "2026/07/02 04:27:00 (美東)")
+     * @returns {Date|null} Parsed Date object
+     */
+    function parseFutuDate(timeStr) {
+      if (!timeStr) return null;
+      const match = timeStr.match(/(\d{4})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+      if (!match) return null;
+
+      const year = parseInt(match[1]);
+      const month = parseInt(match[2]);
+      const day = parseInt(match[3]);
+      const hours = parseInt(match[4]);
+      const minutes = parseInt(match[5]);
+      const seconds = parseInt(match[6]);
+
+      return new Date(year, month - 1, day, hours, minutes, seconds);
+    }
+
+    // =====================================================
+    // Day Trade P/L Calculation Functions
+    // =====================================================
+
+    /**
+     * Group trades by date and stock code
+     * @param {Array<Object>} trades - Array of trade objects
+     * @returns {Object} Map of "date_stockCode" -> Array of trades
+     */
+    function groupByDateStock(trades) {
+      const groups = {};
+
+      trades.forEach(trade => {
+        const dateKey = getDateKey(trade.date);
+        const key = `${dateKey}_${trade.stockCode}`;
+        if (!groups[key]) {
+          groups[key] = [];
+        }
+        groups[key].push(trade);
+      });
+
+      return groups;
+    }
+
+    /**
+     * Check if a group of trades is a day trade (both buy and sell)
+     * @param {Array<Object>} trades - Array of trades for same date+stock
+     * @returns {boolean} True if day trade
+     */
+    function isDayTrade(trades) {
+      const directions = new Set(trades.map(t => t.direction));
+      return directions.has("買入") && directions.has("賣出");
+    }
+
+    /**
+     * Calculate day trade P/L for a group of trades
+     * @param {Array<Object>} trades - Array of trades for same date+stock
+     * @returns {Object} P/L result with currency info
+     */
+    function calculateDayTradePL(trades) {
+      // Separate buy and sell trades
+      const buyTrades = trades.filter(t => t.direction === "買入");
+      const sellTrades = trades.filter(t => t.direction === "賣出");
+
+      // Calculate totals
+      const totalBuyQty = buyTrades.reduce((sum, t) => sum + t.filledQty, 0);
+      const totalBuyAmount = buyTrades.reduce((sum, t) => sum + t.filledAmount, 0);
+      const totalSellQty = sellTrades.reduce((sum, t) => sum + t.filledQty, 0);
+      const totalSellAmount = sellTrades.reduce((sum, t) => sum + t.filledAmount, 0);
+      const totalFees = trades.reduce((sum, t) => sum + t.totalFees, 0);
+
+      // Calculate matched quantity
+      const matchedQty = Math.min(totalBuyQty, totalSellQty);
+
+      // Calculate average buy price
+      const avgBuyPrice = totalBuyQty > 0 ? totalBuyAmount / totalBuyQty : 0;
+
+      // Calculate matched buy cost
+      const matchedBuyCost = matchedQty * avgBuyPrice;
+
+      // Calculate matched sell amount (proportional)
+      const matchedSellAmount = totalSellQty > 0
+        ? (matchedQty / totalSellQty) * totalSellAmount
+        : 0;
+
+      // Calculate net P/L
+      const netPL = matchedSellAmount - matchedBuyCost - totalFees;
+
+      // Get currency from first trade
+      const currency = trades[0]?.currency || "HKD";
+
+      return {
+        netPL,
+        currency,
+        matchedQty,
+        totalBuyQty,
+        totalSellQty,
+        totalFees
+      };
+    }
+
+    /**
+     * Calculate day trade P/L for all trades
+     * @param {Array<Object>} trades - Array of Futu trade objects
+     * @returns {Object} Map of date -> { stockCode: plResult, ... }
+     */
+    function dayTradePL(trades) {
+      const result = {};
+      const groups = groupByDateStock(trades);
+
+      Object.keys(groups).forEach(key => {
+        const tradesInGroup = groups[key];
+        if (!isDayTrade(tradesInGroup)) return;
+
+        const [dateKey, stockCode] = key.split('_');
+        if (!result[dateKey]) {
+          result[dateKey] = {};
+        }
+
+        const plResult = calculateDayTradePL(tradesInGroup);
+        result[dateKey][stockCode] = plResult;
+      });
+
+      return result;
+    }
+
+    /**
+     * Build calendar data from Futu day trade P/L
+     * @param {Object} dayPLData - Map of date -> { stockCode: plResult }
+     * @returns {Object} Calendar data with daily totals
+     */
+    function buildFutuCalendarData(dayPLData) {
+      const result = {};
+
+      Object.keys(dayPLData).forEach(dateKey => {
+        const stocks = dayPLData[dateKey];
+        const products = {};
+        let total = 0;
+        let currency = "HKD"; // Default
+
+        Object.keys(stocks).forEach(stockCode => {
+          const plResult = stocks[stockCode];
+          products[stockCode] = plResult.netPL;
+          total += plResult.netPL;
+          currency = plResult.currency;
+        });
+
+        result[dateKey] = { products, total, currency };
+      });
+
+      return result;
+    }
+
+    /**
+     * Format P/L display with currency suffix
+     * @param {number} pl - P/L amount
+     * @param {string} currency - Currency code
+     * @returns {string} Formatted P/L string
+     */
+    function formatPLWithCurrency(pl, currency = "HKD") {
+      const sign = pl > 0 ? "+" : "";
+      const value = Math.round(Math.abs(pl));
+      const display = pl < 0 ? `($${value})` : `${sign}$${value}`;
+      return currency === "USD" ? `${display} USD` : display;
+    }
+
+    // =====================================================
+    // Data Loading Functions
+    // =====================================================
+
+    /**
+     * Load and parse data based on current data source
+     * @returns {Promise<Object>} Calendar data
+     */
+    async function loadData() {
+      if (currentDataSource === "futu") {
+        const csvText = await loadFutuCSVData();
+        const trades = parseFutuCSV(csvText);
+        const dayPLData = dayTradePL(trades);
+        return buildFutuCalendarData(dayPLData);
+      } else {
+        const csvText = await loadCSVData();
+        const trades = parseCSV(csvText);
+        return buildCalendarData(trades);
+      }
+    }
+
+    /**
+     * Switch data source and re-render
+     * @param {string} source - "trading212" or "futu"
+     */
+    async function switchDataSource(source) {
+      currentDataSource = source;
+
+      // Update button states
+      document.getElementById("trading212Btn").classList.toggle("active", source === "trading212");
+      document.getElementById("futuBtn").classList.toggle("active", source === "futu");
+
+      await init();
+    }
+
     /**
      * Initialize the calendar application
      */
     async function init() {
       const container = document.getElementById("calendar-container");
       try {
-        const csvText = await loadCSVData();
-        const trades = parseCSV(csvText);
-        calendarData = buildCalendarData(trades);
+        calendarData = await loadData();
         availableMonths = getAvailableMonths(calendarData);
-        
+
         // Set default month to current month if available, otherwise latest
         const now = new Date();
         const currentYear = now.getFullYear();
         const currentMonth = now.getMonth() + 1;
-        
+
         currentMonthIndex = availableMonths.findIndex(
           m => m.year === currentYear && m.month === currentMonth
         );
-        
+
         if (currentMonthIndex === -1) {
           currentMonthIndex = availableMonths.length - 1;
         }
-        
+
         renderCurrentMonth();
       } catch (error) {
         container.innerHTML = `<div style="color: red; text-align: center; padding: 40px;">
